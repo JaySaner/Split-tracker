@@ -1,9 +1,9 @@
 # SplitSmart — starter
 
-The starter app for the **deepEntra Academy · Build & Ship It** course. It's a basic
-expense-splitter (one group, a list of expenses, a running total). Over the course you'll
-give it an **AI brain** (Hour 3) and a **real database with logins** (Hour 5), then polish
-and ship it to your own domain (Hours 7–8).
+The starter app for the **deepEntra Academy · Build & Ship It** course. It includes a
+responsive expense overview with quick entry, search, and a running spend summary. Over the
+course you'll give it an **AI brain** (Hour 3) and a **real database with logins** (Hour 5),
+then ship it to your own domain (Hours 7–8).
 
 This is the **"My Group"** app you see on the course slide — the basic version you deploy in
 Hour 2, before you add the magic.
@@ -66,9 +66,9 @@ git push
 | | |
 | --- | --- |
 | **Framework** | [Next.js](https://nextjs.org) (App Router) + React |
-| **The app** | `app/page.js` — the whole SplitSmart UI (one file to start) |
-| **Styles** | `app/globals.css` + inline styles (deepEntra blue) |
-| **Data** | Saved in your browser (`localStorage`) for now — you'll move it to a real database in Hour 5 |
+| **The app** | `app/page.js` — SplitSmart overview and expense entry |
+| **Styles** | `app/globals.css` — responsive dashboard and form styles |
+| **Data** | Supabase for signed-in users; browser `localStorage` in local-preview mode |
 
 ## Scripts
 ```bash
@@ -76,6 +76,19 @@ npm run dev     # local dev → http://localhost:3000
 npm run build   # production build
 npm run start   # run the production build
 ```
+
+## Connect Supabase
+
+1. In Supabase, open **SQL Editor** and run `supabase/schema.sql`.
+2. Run `supabase/schema_hour6.sql` after it if you want the group tables and RLS policies.
+3. Copy `.env.example` to `.env.local` and enter the project URL and publishable/anon key from **Project Settings → API**.
+4. Restart `npm run dev`, create an account, and verify your email if Supabase email confirmation is enabled.
+5. In **Authentication → URL Configuration**, allow `http://localhost:3000` and your deployed app URL for email confirmation and password recovery redirects.
+
+The app reads, adds, and removes authenticated personal expenses from Supabase. With no
+Supabase URL/key configured, it remains in local-preview mode. Existing local browser
+expenses are not automatically migrated. The group schema is prepared, but group creation,
+invites, splits, and settlements are not yet connected to the UI.
 
 ---
 

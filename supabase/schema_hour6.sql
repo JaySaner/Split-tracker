@@ -1,73 +1,303 @@
--- SplitSmart · Hour 6 — groups + membership + multi-tenant Row-Level Security
+-- SplitSmart: groups, membership, and group-scoped expense access.
 --
--- HOW TO RUN THIS (after you've already run schema.sql in Hour 5):
---   1. Supabase → left sidebar → SQL Editor → + New query
---   2. Paste everything in this file → Run (Cmd/Ctrl + Enter)
---   3. You should see "Success. No rows returned."
---
--- Safe to run more than once.
+-- Run schema.sql first, then run this file. This migration is safe to rerun.
+-- Group join codes are bearer invitations: share them only with intended members.
 
--- a GROUP is one "tenant" (Goa Trip, Flat 304, ...). join_code lets friends join.
-create table if not exists groups (
-  id         uuid primary key default gen_random_uuid(),
-  name       text not null,
-  join_code  text not null unique default upper(substr(md5(random()::text), 1, 6)),
-  created_by uuid not null references auth.users(id) on delete cascade,
-  created_at timestamptz not null default now()
+create table if not exists public.groups (
+  id          uuid primary key default gen_random_uuid(),
+  name        text not null check (length(trim(name)) > 0),
+  description text,
+  currency    text not null default 'INR',
+  join_code   text not null unique
+    default upper(replace(gen_random_uuid()::text, '-', '')),
+  created_by  uuid not null references auth.users(id) on delete cascade,
+  archived    boolean not null default false,
+  created_at  timestamptz not null default now(),
+  updated_at  timestamptz not null default now()
 );
 
--- who belongs to which group
-create table if not exists group_members (
-  group_id  uuid not null references groups(id) on delete cascade,
+alter table public.groups
+  add column if not exists description text,
+  add column if not exists currency text not null default 'INR',
+  add column if not exists archived boolean not null default false,
+  add column if not exists updated_at timestamptz not null default now();
+
+alter table public.groups
+  alter column join_code
+  set default upper(replace(gen_random_uuid()::text, '-', ''));
+
+-- Replace legacy six-character codes with high-entropy values. This
+-- intentionally invalidates previously shared codes.
+update public.groups
+set join_code = upper(replace(gen_random_uuid()::text, '-', ''))
+where length(join_code) < 32;
+
+create table if not exists public.group_members (
+  group_id  uuid not null references public.groups(id) on delete cascade,
   user_id   uuid not null references auth.users(id) on delete cascade,
+  role      text not null default 'member'
+    check (role in ('owner', 'admin', 'member')),
   joined_at timestamptz not null default now(),
   primary key (group_id, user_id)
 );
 
--- every expense now belongs to a group
-alter table expenses add column if not exists group_id uuid references groups(id) on delete cascade;
+alter table public.group_members
+  add column if not exists role text not null default 'member';
 
--- helper: "is the logged-in person a member of this group?"
--- SECURITY DEFINER lets it check membership WITHOUT tripping RLS recursion.
-create or replace function is_group_member(gid uuid)
-returns boolean language sql security definer stable
-set search_path = public as $$
-  select exists (select 1 from group_members
-                 where group_id = gid and user_id = auth.uid());
+do $$
+begin
+  if not exists (
+    select 1 from pg_constraint
+    where conrelid = 'public.group_members'::regclass
+      and conname = 'group_members_role_check'
+  ) then
+    alter table public.group_members
+      add constraint group_members_role_check
+      check (role in ('owner', 'admin', 'member')) not valid;
+  end if;
+end
 $$;
 
--- join a group by its code (runs as owner, so it can find the group)
-create or replace function join_group(code text)
-returns uuid language plpgsql security definer
-set search_path = public as $$
-declare gid uuid;
+alter table public.expenses
+  add column if not exists group_id uuid references public.groups(id) on delete restrict;
+
+create index if not exists group_members_user_group_idx
+  on public.group_members (user_id, group_id);
+create index if not exists expenses_group_created_idx
+  on public.expenses (group_id, created_at desc)
+  where group_id is not null;
+
+create or replace function public.is_group_member(gid uuid)
+returns boolean
+language sql
+security definer
+stable
+set search_path = public
+as $$
+  select auth.uid() is not null
+    and exists (
+      select 1 from public.group_members
+      where group_id = gid and user_id = auth.uid()
+    );
+$$;
+
+create or replace function public.is_group_owner(gid uuid)
+returns boolean
+language sql
+security definer
+stable
+set search_path = public
+as $$
+  select auth.uid() is not null
+    and exists (
+      select 1 from public.groups
+      where id = gid and created_by = auth.uid()
+    );
+$$;
+
+create or replace function public.is_active_group_member(gid uuid)
+returns boolean
+language sql
+security definer
+stable
+set search_path = public
+as $$
+  select auth.uid() is not null
+    and exists (
+      select 1
+      from public.group_members as members
+      join public.groups as shared_group on shared_group.id = members.group_id
+      where members.group_id = gid
+        and members.user_id = auth.uid()
+        and shared_group.archived = false
+    );
+$$;
+
+create or replace function public.is_active_group_owner(gid uuid)
+returns boolean
+language sql
+security definer
+stable
+set search_path = public
+as $$
+  select auth.uid() is not null
+    and exists (
+      select 1 from public.groups
+      where id = gid and created_by = auth.uid() and archived = false
+    );
+$$;
+
+-- Group creation must also create the owner's membership atomically.
+create or replace function public.add_group_creator_as_member()
+returns trigger
+language plpgsql
+security definer
+set search_path = public
+as $$
 begin
-  select id into gid from groups where join_code = upper(trim(code));
-  if gid is null then raise exception 'No group with that code'; end if;
-  insert into group_members (group_id, user_id) values (gid, auth.uid())
-    on conflict do nothing;
+  insert into public.group_members (group_id, user_id, role)
+  values (new.id, new.created_by, 'owner')
+  on conflict (group_id, user_id)
+  do update set role = 'owner';
+  return new;
+end;
+$$;
+
+create or replace function public.set_group_updated_at()
+returns trigger
+language plpgsql
+set search_path = public
+as $$
+begin
+  new.updated_at = now();
+  return new;
+end;
+$$;
+
+drop trigger if exists groups_add_creator_membership on public.groups;
+create trigger groups_add_creator_membership
+  after insert on public.groups
+  for each row execute function public.add_group_creator_as_member();
+
+drop trigger if exists groups_set_updated_at on public.groups;
+create trigger groups_set_updated_at
+  before update on public.groups
+  for each row execute function public.set_group_updated_at();
+
+-- Repair groups created before the membership trigger existed.
+insert into public.group_members (group_id, user_id, role)
+select id, created_by, 'owner'
+from public.groups
+on conflict (group_id, user_id) do update set role = 'owner';
+
+-- Joining requires an authenticated user and possession of the full random
+-- invitation code. Direct client inserts into group_members are not allowed.
+create or replace function public.join_group(code text)
+returns uuid
+language plpgsql
+security definer
+set search_path = public
+as $$
+declare
+  gid uuid;
+  joining_user uuid := auth.uid();
+begin
+  if joining_user is null then
+    raise exception 'Sign in before joining a group';
+  end if;
+  if code is null or length(trim(code)) <> 32 then
+    raise exception 'Invalid invitation code';
+  end if;
+
+  select id into gid
+  from public.groups
+  where join_code = upper(trim(code))
+    and archived = false;
+
+  if gid is null then
+    raise exception 'No active group matches that invitation code';
+  end if;
+
+  insert into public.group_members (group_id, user_id)
+  values (gid, joining_user)
+  on conflict (group_id, user_id) do nothing;
+
   return gid;
-end; $$;
+end;
+$$;
 
--- turn on Row-Level Security, then the rules (safe to re-run)
-alter table groups        enable row level security;
-alter table group_members enable row level security;
-alter table expenses      enable row level security;
+revoke all on function public.is_group_member(uuid) from public;
+revoke all on function public.is_group_owner(uuid) from public;
+revoke all on function public.is_active_group_member(uuid) from public;
+revoke all on function public.is_active_group_owner(uuid) from public;
+revoke all on function public.join_group(text) from public;
+revoke all on function public.add_group_creator_as_member() from public;
+revoke all on function public.set_group_updated_at() from public;
+grant execute on function public.is_group_member(uuid) to authenticated;
+grant execute on function public.is_group_owner(uuid) to authenticated;
+grant execute on function public.is_active_group_member(uuid) to authenticated;
+grant execute on function public.is_active_group_owner(uuid) to authenticated;
+grant execute on function public.join_group(text) to authenticated;
 
-drop policy if exists "see my groups"         on groups;
-drop policy if exists "create groups"         on groups;
-drop policy if exists "see my memberships"    on group_members;
-drop policy if exists "join groups"           on group_members;
-drop policy if exists "see group expenses"    on expenses;
-drop policy if exists "add group expenses"    on expenses;
-drop policy if exists "delete group expenses" on expenses;
+alter table public.groups enable row level security;
+alter table public.group_members enable row level security;
+alter table public.expenses enable row level security;
 
-create policy "see my groups"      on groups for select using (is_group_member(id));
-create policy "create groups"      on groups for insert with check (auth.uid() = created_by);
+revoke all on public.groups, public.group_members from anon;
+grant select, insert, update on public.groups to authenticated;
+grant select, update, delete on public.group_members to authenticated;
 
-create policy "see my memberships" on group_members for select using (user_id = auth.uid());
-create policy "join groups"        on group_members for insert with check (user_id = auth.uid());
+drop policy if exists "see my groups" on public.groups;
+drop policy if exists "create groups" on public.groups;
+drop policy if exists "groups_select" on public.groups;
+drop policy if exists "groups_insert" on public.groups;
+drop policy if exists "groups_update" on public.groups;
 
-create policy "see group expenses"    on expenses for select using (is_group_member(group_id));
-create policy "add group expenses"    on expenses for insert with check (is_group_member(group_id));
-create policy "delete group expenses" on expenses for delete using (is_group_member(group_id));
+create policy groups_select on public.groups
+  for select to authenticated
+  using (public.is_group_member(id));
+create policy groups_insert on public.groups
+  for insert to authenticated
+  with check (auth.uid() = created_by);
+create policy groups_update on public.groups
+  for update to authenticated
+  using (public.is_group_owner(id))
+  with check (public.is_group_owner(id) and created_by = auth.uid());
+
+drop policy if exists "see my memberships" on public.group_members;
+drop policy if exists "join groups" on public.group_members;
+drop policy if exists "group_members_select" on public.group_members;
+drop policy if exists "group_members_update" on public.group_members;
+drop policy if exists "group_members_delete" on public.group_members;
+
+create policy group_members_select on public.group_members
+  for select to authenticated
+  using (public.is_group_member(group_id));
+create policy group_members_update on public.group_members
+  for update to authenticated
+  using (public.is_active_group_owner(group_id))
+  with check (public.is_active_group_owner(group_id));
+create policy group_members_delete on public.group_members
+  for delete to authenticated
+  using (public.is_active_group_owner(group_id) and user_id <> auth.uid());
+
+drop policy if exists "read own expenses" on public.expenses;
+drop policy if exists "insert own expenses" on public.expenses;
+drop policy if exists "update own expenses" on public.expenses;
+drop policy if exists "delete own expenses" on public.expenses;
+drop policy if exists "see group expenses" on public.expenses;
+drop policy if exists "add group expenses" on public.expenses;
+drop policy if exists "delete group expenses" on public.expenses;
+drop policy if exists "expenses_select" on public.expenses;
+drop policy if exists "expenses_insert" on public.expenses;
+drop policy if exists "expenses_update" on public.expenses;
+drop policy if exists "expenses_delete" on public.expenses;
+
+create policy expenses_select on public.expenses
+  for select to authenticated
+  using (
+    auth.uid() = user_id
+    or (group_id is not null and public.is_group_member(group_id))
+  );
+create policy expenses_insert on public.expenses
+  for insert to authenticated
+  with check (
+    auth.uid() = user_id
+    and (group_id is null or public.is_active_group_member(group_id))
+  );
+create policy expenses_update on public.expenses
+  for update to authenticated
+  using (
+    auth.uid() = user_id
+    and (group_id is null or public.is_active_group_member(group_id))
+  )
+  with check (
+    auth.uid() = user_id
+    and (group_id is null or public.is_active_group_member(group_id))
+  );
+create policy expenses_delete on public.expenses
+  for delete to authenticated
+  using (
+    auth.uid() = user_id
+    and (group_id is null or public.is_active_group_member(group_id))
+  );
