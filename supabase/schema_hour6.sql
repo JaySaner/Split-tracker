@@ -206,11 +206,38 @@ begin
 end;
 $$;
 
+create or replace function public.create_group(group_name text)
+returns uuid
+language plpgsql
+security definer
+set search_path = public
+as $$
+declare
+  creator uuid := auth.uid();
+  created_group_id uuid;
+begin
+  if creator is null then
+    raise exception 'Sign in before creating a group';
+  end if;
+
+  if group_name is null or length(trim(group_name)) = 0 or length(trim(group_name)) > 80 then
+    raise exception 'Group name must be between 1 and 80 characters';
+  end if;
+
+  insert into public.groups (name, created_by)
+  values (trim(group_name), creator)
+  returning id into created_group_id;
+
+  return created_group_id;
+end;
+$$;
+
 revoke all on function public.is_group_member(uuid) from public;
 revoke all on function public.is_group_owner(uuid) from public;
 revoke all on function public.is_active_group_member(uuid) from public;
 revoke all on function public.is_active_group_owner(uuid) from public;
 revoke all on function public.join_group(text) from public;
+revoke all on function public.create_group(text) from public;
 revoke all on function public.add_group_creator_as_member() from public;
 revoke all on function public.set_group_updated_at() from public;
 grant execute on function public.is_group_member(uuid) to authenticated;
@@ -218,6 +245,7 @@ grant execute on function public.is_group_owner(uuid) to authenticated;
 grant execute on function public.is_active_group_member(uuid) to authenticated;
 grant execute on function public.is_active_group_owner(uuid) to authenticated;
 grant execute on function public.join_group(text) to authenticated;
+grant execute on function public.create_group(text) to authenticated;
 
 alter table public.groups enable row level security;
 alter table public.group_members enable row level security;

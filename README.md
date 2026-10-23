@@ -80,7 +80,7 @@ npm run start   # run the production build
 ## Connect Supabase
 
 1. In Supabase, open **SQL Editor** and run `supabase/schema.sql`.
-2. Run `supabase/schema_hour6.sql` after it to create groups, membership, private group policies, the creator-membership trigger, and the secure `join_group(code)` function. Re-running this migration replaces legacy short invite codes with stronger codes, so share the newly displayed code with members.
+2. Run `supabase/schema_hour6.sql` after it to create groups, membership, private group policies, the creator-membership trigger, and the secure `create_group(group_name)` and `join_group(code)` functions. Re-running this migration replaces legacy short invite codes with stronger codes, so share the newly displayed code with members.
 3. Copy `.env.example` to `.env.local` and enter the project URL and publishable/anon key from **Project Settings → API**.
 4. Restart `npm run dev`, create an account, and verify your email if Supabase email confirmation is enabled.
 5. In **Authentication → URL Configuration**, allow `http://localhost:3000` and your deployed app URL for email confirmation and password recovery redirects.

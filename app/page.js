@@ -444,14 +444,23 @@ export default function Home() {
     setGroupBusy(true);
     setGroupError('');
     try {
+      const { data: groupId, error: createError } = await supabase.rpc('create_group', {
+        group_name: name,
+      });
+
+      if (createError) {
+        setGroupError(`Could not create group: ${createError.message}. Run the latest supabase/schema_hour6.sql in your Supabase SQL Editor, then retry.`);
+        return;
+      }
+
       const { data, error } = await supabase
         .from('groups')
-        .insert({ name, created_by: user.id })
         .select('id, name, description, currency, join_code, created_by, archived, created_at')
+        .eq('id', groupId)
         .single();
 
       if (error) {
-        setGroupError(`Could not create group: ${error.message}. Confirm you ran the latest supabase/schema_hour6.sql.`);
+        setGroupError(`The group was created, but could not be loaded: ${error.message}. Refresh your groups and try again.`);
         return;
       }
 
