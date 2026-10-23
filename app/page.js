@@ -397,6 +397,32 @@ export default function Home() {
     }, { toReceive: 0, toPay: 0 });
     return { toReceive: cents.toReceive / 100, toPay: cents.toPay / 100 };
   }, [expensesWithSplits, user]);
+  const categoryInsights = useMemo(() => {
+    const totals = new Map();
+    expenses.forEach((expense) => {
+      const category = expense.category || 'Other';
+      totals.set(category, (totals.get(category) || 0) + Number(expense.amount || 0));
+    });
+    return [...totals.entries()]
+      .map(([name, amount]) => ({
+        name,
+        amount,
+        percentage: total ? Math.round((amount / total) * 100) : 0,
+      }))
+      .sort((first, second) => second.amount - first.amount);
+  }, [expenses, total]);
+  const biggestExpense = useMemo(
+    () => [...expenses].sort((first, second) => Number(second.amount) - Number(first.amount))[0] || null,
+    [expenses]
+  );
+  const topPayer = useMemo(() => {
+    const totals = new Map();
+    expenses.forEach((expense) => {
+      const payer = expense.paidBy || 'You';
+      totals.set(payer, (totals.get(payer) || 0) + Number(expense.amount || 0));
+    });
+    return [...totals.entries()].sort((first, second) => second[1] - first[1])[0] || null;
+  }, [expenses]);
   const visibleExpenses = expensesWithSplits.filter((expense) =>
     `${expense.name} ${expense.paidBy}`.toLowerCase().includes(query.toLowerCase())
   );
@@ -1051,14 +1077,108 @@ export default function Home() {
                 <div className="group-footnote"><span className="info-mark">i</span> New expenses are split evenly among members.</div>
               </article>
 
-              <article className="insight-card" id="insights">
-                <div className="insight-heading"><span className="insight-icon">✦</span><span>SMART INSIGHT</span></div>
-                <h3>{expenses.length ? 'Every expense, in one place.' : 'Start with one shared expense.'}</h3>
-                <p>{expenses.length ? 'Your group has recorded ' + inr(total) + ' across ' + expenses.length + (expenses.length === 1 ? ' expense.' : ' expenses.') : 'Add a group expense and keep your shared spending organized.'}</p>
-                <div className="insight-rule" />
-                <span className="insight-caption"><span className="pulse-dot" /> Updated as you add expenses</span>
+            </div>
+          </section>
+
+          <section className="insights-section" id="insights" aria-labelledby="insights-title">
+            <div className="insights-heading">
+              <div>
+                <p className="insights-kicker"><span>✦</span> YOUR MONEY, MADE CLEAR</p>
+                <h2 id="insights-title">Spending insights</h2>
+                <p>Small details that give your group a clearer picture.</p>
+              </div>
+              <span className="insights-period">{activeGroup?.name || 'All expenses'} <span className="insight-period-dot" /> All time</span>
+            </div>
+
+            <div className="insights-overview">
+              <article className="insight-hero">
+                <div className="insight-hero-copy">
+                  <span className="insight-hero-label">TOTAL GROUP SPEND</span>
+                  <strong>{inr(total)}</strong>
+                  <p>{expenses.length
+                    ? `${expenses.length} ${expenses.length === 1 ? 'expense' : 'expenses'} tracked${activeGroup ? ` in ${activeGroup.name}` : ''}. Keep adding expenses to see your trends grow.`
+                    : 'Add your first expense to start seeing where your money goes.'}</p>
+                </div>
+                <div className="insight-hero-chart" aria-hidden="true">
+                  {[28, 46, 36, 62, 48, 76, 58, 92, 70, 100, 78, 88].map((height, index) => (
+                    <span key={index} style={{ '--bar-height': `${height}%`, '--bar-delay': `${index * 35}ms` }} />
+                  ))}
+                </div>
+                <span className="insight-orb insight-orb-one" />
+                <span className="insight-orb insight-orb-two" />
+              </article>
+              <article className="insight-stat-card">
+                <span className="insight-stat-icon insight-stat-icon-average"><Icon name="chart" size={18} /></span>
+                <span className="insight-stat-label">AVERAGE EXPENSE</span>
+                <strong>{inr(average)}</strong>
+                <small>Per recorded expense</small>
+              </article>
+              <article className="insight-stat-card">
+                <span className="insight-stat-icon insight-stat-icon-count"><Icon name="receipt" size={18} /></span>
+                <span className="insight-stat-label">EXPENSES TRACKED</span>
+                <strong>{expenses.length}</strong>
+                <small>{groupMembers.length || 'Your'} group {groupMembers.length === 1 ? 'member' : 'members'} sharing</small>
               </article>
             </div>
+
+            <div className="insights-detail-grid">
+              <article className="panel category-insights">
+                <div className="insights-panel-heading">
+                  <div>
+                    <span className="insights-panel-kicker">SPENDING MIX</span>
+                    <h3>By category</h3>
+                  </div>
+                  <span className="insight-panel-icon"><Icon name="chart" size={17} /></span>
+                </div>
+                {categoryInsights.length ? (
+                  <div className="category-insight-list">
+                    {categoryInsights.slice(0, 5).map((category, index) => (
+                      <div className="category-insight-row" key={category.name}>
+                        <div className="category-insight-top">
+                          <span><i className={`category-dot category-dot-${index % 5}`} />{category.name}</span>
+                          <strong>{inr(category.amount)} <small>{category.percentage}%</small></strong>
+                        </div>
+                        <div className="category-track">
+                          <span className={`category-fill category-fill-${index % 5}`} style={{ width: `${category.percentage}%` }} />
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                ) : (
+                  <div className="insights-empty">Your spending categories will appear here after you add an expense.</div>
+                )}
+              </article>
+
+              <div className="insight-highlights">
+                <article className="insight-highlight insight-highlight-expense">
+                  <span className="insight-highlight-icon"><Icon name="receipt" size={17} /></span>
+                  <span className="insight-highlight-label">BIGGEST EXPENSE</span>
+                  {biggestExpense ? (
+                    <>
+                      <strong>{biggestExpense.name}</strong>
+                      <span className="insight-highlight-value">{inr(biggestExpense.amount)}</span>
+                      <small>{biggestExpense.category || 'Other'} <span>·</span> {formatDate(biggestExpense.date)}</small>
+                    </>
+                  ) : (
+                    <p>Add an expense to discover your biggest spend.</p>
+                  )}
+                </article>
+                <article className="insight-highlight insight-highlight-payer">
+                  <span className="insight-highlight-icon"><Icon name="users" size={17} /></span>
+                  <span className="insight-highlight-label">TOP CONTRIBUTOR</span>
+                  {topPayer ? (
+                    <>
+                      <strong>{topPayer[0]}</strong>
+                      <span className="insight-highlight-value">{inr(topPayer[1])}</span>
+                      <small>Paid toward group expenses</small>
+                    </>
+                  ) : (
+                    <p>Payer activity will show here as expenses are added.</p>
+                  )}
+                </article>
+              </div>
+            </div>
+            <div className="insights-footnote"><span className="pulse-dot" /> Insights update automatically as group expenses change.</div>
           </section>
 
           <footer className="page-footer">
