@@ -74,6 +74,7 @@ function formatDate(value) {
 function mapExpense(row) {
   return {
     id: row.id,
+    createdBy: row.user_id,
     name: row.name,
     emoji: row.emoji || '🧾',
     paidBy: row.paid_by,
@@ -90,6 +91,16 @@ export default function Home() {
   const [ready, setReady] = useState(false);
   const [authChecked, setAuthChecked] = useState(!supabase);
   const [user, setUser] = useState(null);
+  const [groups, setGroups] = useState([]);
+  const [activeGroup, setActiveGroup] = useState(null);
+  const [groupsReady, setGroupsReady] = useState(!supabase);
+  const [groupPickerOpen, setGroupPickerOpen] = useState(false);
+  const [groupModal, setGroupModal] = useState('');
+  const [groupName, setGroupName] = useState('');
+  const [joinCode, setJoinCode] = useState('');
+  const [groupError, setGroupError] = useState('');
+  const [groupBusy, setGroupBusy] = useState(false);
+  const [codeCopied, setCodeCopied] = useState(false);
   const [recoveryMode, setRecoveryMode] = useState(false);
   const [storageError, setStorageError] = useState(supabaseConfigurationError);
   const [modalOpen, setModalOpen] = useState(false);
@@ -114,11 +125,17 @@ export default function Home() {
       const { data: { subscription } } = supabase.auth.onAuthStateChange((event, session) => {
         if (!active) return;
         if (event === 'PASSWORD_RECOVERY') setRecoveryMode(true);
+        if (event === 'SIGNED_IN' || event === 'INITIAL_SESSION') {
+          setGroupsReady(!session?.user);
+        }
         setUser((currentUser) =>
           currentUser?.id === session?.user?.id ? currentUser : session?.user || null
         );
         setAuthChecked(true);
         if (!session) {
+          setGroups([]);
+          setActiveGroup(null);
+          setGroupsReady(true);
           setExpenses([]);
           setReady(true);
         }
@@ -130,12 +147,14 @@ export default function Home() {
           setStorageError(`Could not restore your Supabase session: ${error.message}`);
         }
         setUser(data.session?.user || null);
+        setGroupsReady(!data.session);
         setAuthChecked(true);
         if (!data.session) setReady(true);
       }).catch((error) => {
         if (!active) return;
         setStorageError(`Could not connect to Supabase: ${error.message || 'Check your connection and try again.'}`);
         setAuthChecked(true);
+        setGroupsReady(true);
         setReady(true);
       });
 
@@ -170,13 +189,82 @@ export default function Home() {
   }, [expenses, ready]);
 
   useEffect(() => {
-    if (!supabase || !user) return undefined;
+    if (!supabase || !user) {
+      if (supabase) {
+        setGroups([]);
+        setActiveGroup(null);
+        setGroupsReady(true);
+      }
+      return undefined;
+    }
+
+    let active = true;
+    setGroupsReady(false);
+    supabase
+      .from('groups')
+      .select('id, name, description, currency, join_code, created_by, archived, created_at')
+      .eq('archived', false)
+      .order('created_at', { ascending: false })
+      .then(({ data, error }) => {
+        if (!active) return;
+        if (error) {
+          setStorageError(`Could not load your groups: ${error.message}`);
+          setGroups([]);
+          setActiveGroup(null);
+        } else {
+          const availableGroups = data || [];
+          let savedGroupId = null;
+          let preferenceWarning = '';
+          try {
+            savedGroupId = localStorage.getItem(`splitsmart.activeGroup.${user.id}`);
+          } catch {
+            preferenceWarning = 'Your groups loaded, but this browser could not remember your selected group.';
+          }
+          const selectedGroup =
+            availableGroups.find((group) => group.id === savedGroupId) ||
+            availableGroups[0] ||
+            null;
+          setGroups(availableGroups);
+          setActiveGroup(selectedGroup);
+          if (selectedGroup) {
+            try {
+              localStorage.setItem(`splitsmart.activeGroup.${user.id}`, selectedGroup.id);
+            } catch {
+              preferenceWarning = 'Your groups loaded, but this browser could not remember your selected group.';
+            }
+          }
+          setStorageError(preferenceWarning);
+        }
+        setGroupsReady(true);
+      })
+      .catch((error) => {
+        if (!active) return;
+        setStorageError(`Could not reach Supabase while loading groups: ${error.message || 'Check your connection and try again.'}`);
+        setGroups([]);
+        setActiveGroup(null);
+        setGroupsReady(true);
+      });
+
+    return () => {
+      active = false;
+    };
+  }, [user]);
+
+  useEffect(() => {
+    if (!supabase || !user || !groupsReady) return undefined;
+    if (!activeGroup) {
+      setExpenses([]);
+      setReady(true);
+      return undefined;
+    }
+
     let active = true;
     setReady(false);
 
     supabase
       .from('expenses')
-      .select('id, name, emoji, paid_by, amount, category, expense_date, created_at')
+      .select('id, user_id, group_id, name, emoji, paid_by, amount, category, expense_date, created_at')
+      .eq('group_id', activeGroup.id)
       .order('expense_date', { ascending: false })
       .order('created_at', { ascending: false })
       .then(({ data, error }) => {
@@ -198,7 +286,7 @@ export default function Home() {
     return () => {
       active = false;
     };
-  }, [user]);
+  }, [user, activeGroup, groupsReady]);
 
   const total = expenses.reduce((sum, expense) => sum + Number(expense.amount || 0), 0);
   const average = expenses.length ? Math.round((total / expenses.length) * 100) / 100 : 0;
@@ -220,6 +308,11 @@ export default function Home() {
       return true;
     }
 
+    if (!activeGroup) {
+      setStorageError('Create or join a group before adding an expense.');
+      return false;
+    }
+
     if (!user) {
       setStorageError('Sign in before saving an expense.');
       return false;
@@ -231,6 +324,7 @@ export default function Home() {
         .from('expenses')
         .insert({
           user_id: user.id,
+          group_id: activeGroup.id,
           name: expense.name,
           emoji: expense.emoji || '🧾',
           paid_by: expense.paidBy || user.email || 'You',
@@ -238,7 +332,7 @@ export default function Home() {
           category: expense.category || 'Other',
           expense_date: expense.date || localDateString(),
         })
-        .select('id, name, emoji, paid_by, amount, category, expense_date, created_at')
+        .select('id, user_id, group_id, name, emoji, paid_by, amount, category, expense_date, created_at')
         .single();
 
       if (error) {
@@ -324,6 +418,111 @@ export default function Home() {
     if (error) setStorageError(`Could not sign out: ${error.message}`);
   };
 
+  const rememberGroup = (groupId) => {
+    if (!user) return;
+    try {
+      localStorage.setItem(`splitsmart.activeGroup.${user.id}`, groupId);
+    } catch {
+      setStorageError('Group selected, but this browser could not remember your selection.');
+    }
+  };
+
+  const selectGroup = (group) => {
+    setActiveGroup(group);
+    setExpenses([]);
+    setReady(false);
+    setGroupPickerOpen(false);
+    setQuery('');
+    rememberGroup(group.id);
+  };
+
+  const createGroup = async (event) => {
+    event.preventDefault();
+    const name = groupName.trim();
+    if (!name || !user) return;
+
+    setGroupBusy(true);
+    setGroupError('');
+    try {
+      const { data, error } = await supabase
+        .from('groups')
+        .insert({ name, created_by: user.id })
+        .select('id, name, description, currency, join_code, created_by, archived, created_at')
+        .single();
+
+      if (error) {
+        setGroupError(`Could not create group: ${error.message}. Confirm you ran the latest supabase/schema_hour6.sql.`);
+        return;
+      }
+
+      setGroups((currentGroups) => [data, ...currentGroups]);
+      setActiveGroup(data);
+      setExpenses([]);
+      setReady(false);
+      rememberGroup(data.id);
+      setGroupName('');
+      setGroupModal('');
+      setGroupPickerOpen(false);
+    } catch (error) {
+      setGroupError(`Could not reach Supabase while creating the group: ${error.message || 'Check your connection and try again.'}`);
+    } finally {
+      setGroupBusy(false);
+    }
+  };
+
+  const joinGroup = async (event) => {
+    event.preventDefault();
+    const code = joinCode.trim().toUpperCase();
+    if (!code) return;
+
+    setGroupBusy(true);
+    setGroupError('');
+    try {
+      const { data: groupId, error: joinError } = await supabase.rpc('join_group', { code });
+      if (joinError) {
+        setGroupError(`Could not join group: ${joinError.message}`);
+        return;
+      }
+
+      const { data, error } = await supabase
+        .from('groups')
+        .select('id, name, description, currency, join_code, created_by, archived, created_at')
+        .eq('id', groupId)
+        .single();
+
+      if (error) {
+        setGroupError(`You joined, but the group could not be loaded: ${error.message}`);
+        return;
+      }
+
+      setGroups((currentGroups) => [
+        data,
+        ...currentGroups.filter((group) => group.id !== data.id),
+      ]);
+      setActiveGroup(data);
+      setExpenses([]);
+      setReady(false);
+      rememberGroup(data.id);
+      setJoinCode('');
+      setGroupModal('');
+    } catch (error) {
+      setGroupError(`Could not reach Supabase while joining the group: ${error.message || 'Check your connection and try again.'}`);
+    } finally {
+      setGroupBusy(false);
+    }
+  };
+
+  const copyJoinCode = async () => {
+    if (!activeGroup?.join_code) return;
+    try {
+      await navigator.clipboard.writeText(activeGroup.join_code);
+      setCodeCopied(true);
+      window.setTimeout(() => setCodeCopied(false), 1800);
+    } catch (error) {
+      setStorageError(`Could not copy the invitation code: ${error.message || 'Clipboard access was denied.'}`);
+    }
+  };
+
   if (supabaseConfigurationError) {
     return <AuthScreen configurationError={supabaseConfigurationError} />;
   }
@@ -337,8 +536,8 @@ export default function Home() {
   }
 
   if (supabase && !user) return <AuthScreen />;
-  if (supabase && user && !ready) {
-    return <main className="auth-page"><p className="auth-loading" role="status">Loading your expenses…</p></main>;
+  if (supabase && user && (!groupsReady || (activeGroup && !ready))) {
+    return <main className="auth-page"><p className="auth-loading" role="status">Loading your groups and expenses…</p></main>;
   }
 
   return (
@@ -349,11 +548,57 @@ export default function Home() {
           <span className="brand-name">split<span>smart</span></span>
         </a>
 
-        <div className="workspace-switcher" aria-label="Current workspace: My Group">
-          <span className="workspace-icon">M</span>
-          <span className="workspace-copy"><strong>My Group</strong><small>Personal workspace</small></span>
-          <Icon name="down" size={15} className="workspace-chevron" />
-        </div>
+        {supabase ? (
+          <>
+            <button
+              className="workspace-switcher"
+              type="button"
+              aria-label={`Current group: ${activeGroup?.name || 'No group selected'}`}
+              aria-expanded={groupPickerOpen}
+              onClick={() => setGroupPickerOpen((open) => !open)}
+            >
+              <span className="workspace-icon">{activeGroup?.name?.slice(0, 1).toUpperCase() || '+'}</span>
+              <span className="workspace-copy">
+                <strong>{activeGroup?.name || 'Choose a group'}</strong>
+                <small>{activeGroup ? `${groups.length} ${groups.length === 1 ? 'group' : 'groups'} available` : 'No group selected'}</small>
+              </span>
+              <Icon name="down" size={15} className="workspace-chevron" />
+            </button>
+            {groupPickerOpen && (
+              <div className="group-picker" role="menu" aria-label="Switch group">
+                <span className="group-picker-label">YOUR GROUPS</span>
+                {groups.map((group) => (
+                  <button
+                    className={`group-picker-item ${activeGroup?.id === group.id ? 'selected' : ''}`}
+                    type="button"
+                    role="menuitem"
+                    key={group.id}
+                    onClick={() => selectGroup(group)}
+                  >
+                    <span className="group-picker-avatar">{group.name.slice(0, 1).toUpperCase()}</span>
+                    <span>{group.name}</span>
+                    {activeGroup?.id === group.id && <span className="group-picker-check">✓</span>}
+                  </button>
+                ))}
+                {!groups.length && <p className="group-picker-empty">Create a group or join one with an invite code.</p>}
+                <div className="group-picker-actions">
+                  <button type="button" onClick={() => { setGroupError(''); setGroupName(''); setGroupModal('create'); setGroupPickerOpen(false); }}>
+                    <Icon name="plus" size={14} /> Create group
+                  </button>
+                  <button type="button" onClick={() => { setGroupError(''); setJoinCode(''); setGroupModal('join'); setGroupPickerOpen(false); }}>
+                    Join with code
+                  </button>
+                </div>
+              </div>
+            )}
+          </>
+        ) : (
+          <div className="workspace-switcher" aria-label="Current workspace: My Group">
+            <span className="workspace-icon">M</span>
+            <span className="workspace-copy"><strong>My Group</strong><small>Personal workspace</small></span>
+            <Icon name="down" size={15} className="workspace-chevron" />
+          </div>
+        )}
 
         <div className="nav-label">WORKSPACE</div>
         <nav className="side-nav" aria-label="Main navigation">
@@ -394,20 +639,39 @@ export default function Home() {
             <div>
               <p className="eyebrow"><span className="eyebrow-line" /> {todayLabel || 'YOUR WORKSPACE'}</p>
               <h1>Good afternoon, <span>{user?.email?.split('@')[0] || 'You'}</span></h1>
-              <p className="heading-subtitle">Here&apos;s what&apos;s happening with your expenses.</p>
+              <p className="heading-subtitle">{supabase
+                ? activeGroup ? `Here’s what’s happening in ${activeGroup.name}.` : 'Create or join a group to start sharing expenses.'
+                : 'Here’s what’s happening with your expenses.'}</p>
             </div>
-            <button className="button-primary" type="button" onClick={() => { setFormError(''); setModalOpen(true); }}>
+            <button className="button-primary" type="button" disabled={supabase && !activeGroup} onClick={() => { setFormError(''); setModalOpen(true); }}>
               <Icon name="plus" size={17} /> Add expense
             </button>
           </section>
 
           {storageError && <div className="storage-alert" role="status">{storageError}</div>}
+          {supabase && !groups.length && groupsReady && (
+            <section className="group-welcome" aria-labelledby="group-welcome-title">
+              <span className="group-welcome-icon"><Icon name="users" size={21} /></span>
+              <div className="group-welcome-copy">
+                <h2 id="group-welcome-title">Your groups, your private spaces.</h2>
+                <p>Create a group for a trip, home, or event, or join one with an invite code from a friend.</p>
+              </div>
+              <div className="group-welcome-actions">
+                <button className="button-primary" type="button" onClick={() => { setGroupError(''); setGroupName(''); setGroupModal('create'); }}>
+                  <Icon name="plus" size={15} /> Create group
+                </button>
+                <button className="button-secondary" type="button" onClick={() => { setGroupError(''); setJoinCode(''); setGroupModal('join'); }}>
+                  Join a group
+                </button>
+              </div>
+            </section>
+          )}
 
           <section className="overview-grid" aria-label="Group spending overview">
             <article className="total-card">
               <div className="total-card-top">
                 <div>
-                  <span className="card-label">TOTAL RECORDED SPEND</span>
+                  <span className="card-label">{supabase && activeGroup ? 'GROUP SPEND' : 'TOTAL RECORDED SPEND'}</span>
                   <p className="total-amount">{inr(total)}</p>
                 </div>
                 <span className="total-icon"><Icon name="chart" size={20} /></span>
@@ -441,7 +705,7 @@ export default function Home() {
                   <div className="panel-title-line"><h2>Recent expenses</h2><span className="subtle-count">{expenses.length}</span></div>
                   <p className="panel-subtitle">A clear view of what your group has spent.</p>
                 </div>
-                <button className="text-button" type="button" onClick={() => { setFormError(''); setModalOpen(true); }}>
+                <button className="text-button" type="button" disabled={supabase && !activeGroup} onClick={() => { setFormError(''); setModalOpen(true); }}>
                   <Icon name="plus" size={15} /> Add new
                 </button>
               </div>
@@ -452,9 +716,9 @@ export default function Home() {
                   aria-label="Quick add an expense"
                   value={quickText}
                   onChange={(event) => setQuickText(event.target.value)}
-                  placeholder="Quick add — e.g. Groceries 850"
+                  placeholder={supabase && !activeGroup ? 'Create or join a group to add expenses' : 'Quick add — e.g. Groceries 850'}
                 />
-                <button type="submit" disabled={!quickText.trim() || saving}>Add</button>
+                <button type="submit" disabled={!quickText.trim() || saving || (supabase && !activeGroup)}>Add</button>
               </form>
 
               <div className="expense-toolbar">
@@ -470,7 +734,7 @@ export default function Home() {
                   <span className="empty-icon"><Icon name="receipt" size={21} /></span>
                   <strong>{expenses.length ? 'No matching expenses' : 'Your story starts here'}</strong>
                   <p>{expenses.length ? 'Try a different search.' : 'Add your first expense to see it appear here.'}</p>
-                  {!expenses.length && <button type="button" onClick={() => setModalOpen(true)}>Add an expense <Icon name="arrow" size={14} /></button>}
+                  {!expenses.length && !supabase && <button type="button" onClick={() => setModalOpen(true)}>Add an expense <Icon name="arrow" size={14} /></button>}
                 </div>
               ) : (
                 <div className="expense-list">
@@ -483,17 +747,34 @@ export default function Home() {
                       </div>
                       <div className="expense-date">{formatDate(expense.date)}</div>
                       <div className="expense-amount">{inr(expense.amount)}</div>
-                      <button className="remove-button" type="button" aria-label={`Remove ${expense.name}`} disabled={saving} onClick={() => removeExpense(expense.id)}>
-                        <Icon name="trash" size={15} />
-                      </button>
+                      {(!supabase || expense.createdBy === user?.id) && (
+                        <button className="remove-button" type="button" aria-label={`Remove ${expense.name}`} disabled={saving} onClick={() => removeExpense(expense.id)}>
+                          <Icon name="trash" size={15} />
+                        </button>
+                      )}
                     </div>
                   ))}
                 </div>
               )}
-              <div className="expense-list-footer"><span>{supabase ? 'Synced to Supabase' : 'Saved in this browser'}</span><span>{visibleExpenses.length} shown</span></div>
+              <div className="expense-list-footer"><span>{supabase ? activeGroup ? `Private to ${activeGroup.name}` : 'Choose a group to view expenses' : 'Saved in this browser'}</span><span>{visibleExpenses.length} shown</span></div>
             </article>
 
             <div className="right-column">
+              {supabase && activeGroup && (
+                <article className="panel invite-panel">
+                  <div className="panel-header compact">
+                    <div><h2>Invite to {activeGroup.name}</h2><p className="panel-subtitle">Share this private group code.</p></div>
+                    <span className="activity-marker"><Icon name="users" size={15} /></span>
+                  </div>
+                  <div className="invite-code-row">
+                    <code>{activeGroup.join_code}</code>
+                    <button className="button-secondary copy-code-button" type="button" onClick={copyJoinCode}>
+                      {codeCopied ? 'Copied' : 'Copy code'}
+                    </button>
+                  </div>
+                  <p className="invite-warning">Anyone with this code can join. Share it only with people you trust.</p>
+                </article>
+              )}
               <article className="panel group-panel" id="people">
                 <div className="panel-header compact">
                   <div><h2>Payer activity</h2><p className="panel-subtitle">Who&apos;s been picking up the bill.</p></div>
@@ -527,7 +808,7 @@ export default function Home() {
 
           <footer className="page-footer">
             <span>SplitSmart <span className="footer-dot">·</span> A simpler way to share.</span>
-            <span>Preview data is stored locally in your browser.</span>
+            <span>{supabase ? 'Group expenses are private to their members.' : 'Preview data is stored locally in your browser.'}</span>
           </footer>
         </div>
       </section>
@@ -536,7 +817,7 @@ export default function Home() {
         <div className="modal-backdrop" onKeyDown={(event) => { if (event.key === 'Escape') setModalOpen(false); }} onMouseDown={(event) => { if (event.target === event.currentTarget) setModalOpen(false); }}>
           <section className="expense-modal" role="dialog" aria-modal="true" aria-labelledby="modal-title">
             <div className="modal-header">
-              <div><span className="modal-kicker">MY GROUP</span><h2 id="modal-title">Add an expense</h2></div>
+              <div><span className="modal-kicker">{activeGroup?.name || 'MY GROUP'}</span><h2 id="modal-title">Add an expense</h2></div>
               <button className="icon-button modal-close" type="button" aria-label="Close dialog" onClick={() => setModalOpen(false)}><Icon name="close" /></button>
             </div>
             <p className="modal-description">Keep track of a shared purchase. You can add split details later.</p>
@@ -569,6 +850,69 @@ export default function Home() {
               </div>
               <p className="form-disclaimer">{supabase ? 'Saved to your Supabase account. No actual payments are recorded.' : 'This preview saves in this browser only. No actual payments are recorded.'}</p>
             </form>
+          </section>
+        </div>
+      )}
+      {groupModal && (
+        <div className="modal-backdrop" onKeyDown={(event) => { if (event.key === 'Escape' && !groupBusy) setGroupModal(''); }} onMouseDown={(event) => { if (event.target === event.currentTarget && !groupBusy) setGroupModal(''); }}>
+          <section className="expense-modal group-modal" role="dialog" aria-modal="true" aria-labelledby="group-modal-title">
+            <div className="modal-header">
+              <div>
+                <span className="modal-kicker">PRIVATE GROUP</span>
+                <h2 id="group-modal-title">{groupModal === 'create' ? 'Create a group' : 'Join a group'}</h2>
+              </div>
+              <button className="icon-button modal-close" type="button" aria-label="Close dialog" disabled={groupBusy} onClick={() => setGroupModal('')}>
+                <Icon name="close" />
+              </button>
+            </div>
+            <p className="modal-description">{groupModal === 'create'
+              ? 'Start a private space for a trip, home, or shared event.'
+              : 'Enter the invitation code shared by a group member.'}</p>
+            {groupError && <p className="form-error" role="alert">{groupError}</p>}
+            {groupModal === 'create' ? (
+              <form className="expense-form" onSubmit={createGroup}>
+                <label className="field-label">Group name
+                  <input
+                    name="groupName"
+                    autoFocus
+                    maxLength={80}
+                    value={groupName}
+                    onChange={(event) => setGroupName(event.target.value)}
+                    placeholder="e.g. Goa Trip"
+                    required
+                  />
+                </label>
+                <div className="modal-actions">
+                  <button className="button-secondary" type="button" disabled={groupBusy} onClick={() => setGroupModal('')}>Cancel</button>
+                  <button className="button-primary" type="submit" disabled={groupBusy || !groupName.trim()}>
+                    <Icon name="plus" size={15} /> {groupBusy ? 'Creating…' : 'Create group'}
+                  </button>
+                </div>
+              </form>
+            ) : (
+              <form className="expense-form" onSubmit={joinGroup}>
+                <label className="field-label">Invitation code
+                  <input
+                    name="joinCode"
+                    autoFocus
+                    maxLength={32}
+                    autoCapitalize="characters"
+                    autoComplete="off"
+                    value={joinCode}
+                    onChange={(event) => setJoinCode(event.target.value.replace(/\s/g, '').toUpperCase())}
+                    placeholder="Paste the group code"
+                    required
+                  />
+                </label>
+                <p className="form-disclaimer">Only join groups from people you trust. The code grants access to that group.</p>
+                <div className="modal-actions">
+                  <button className="button-secondary" type="button" disabled={groupBusy} onClick={() => setGroupModal('')}>Cancel</button>
+                  <button className="button-primary" type="submit" disabled={groupBusy || !joinCode.trim()}>
+                    {groupBusy ? 'Joining…' : 'Join group'}
+                  </button>
+                </div>
+              </form>
+            )}
           </section>
         </div>
       )}

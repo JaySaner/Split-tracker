@@ -80,18 +80,27 @@ npm run start   # run the production build
 ## Connect Supabase
 
 1. In Supabase, open **SQL Editor** and run `supabase/schema.sql`.
-2. Run `supabase/schema_hour6.sql` after it if you want the group tables and RLS policies.
+2. Run `supabase/schema_hour6.sql` after it to create groups, membership, private group policies, the creator-membership trigger, and the secure `join_group(code)` function. Re-running this migration replaces legacy short invite codes with stronger codes, so share the newly displayed code with members.
 3. Copy `.env.example` to `.env.local` and enter the project URL and publishable/anon key from **Project Settings → API**.
 4. Restart `npm run dev`, create an account, and verify your email if Supabase email confirmation is enabled.
 5. In **Authentication → URL Configuration**, allow `http://localhost:3000` and your deployed app URL for email confirmation and password recovery redirects.
 6. In Vercel, add both Supabase URL and publishable/anon key under **Project Settings → Environment Variables** for the Production environment, then redeploy. The standard names are `NEXT_PUBLIC_SUPABASE_URL` and `NEXT_PUBLIC_SUPABASE_ANON_KEY`; the app also accepts `VITE_SUPABASE_URL` and `VITE_SUPABASE_ANON_KEY`. Production builds without both values show a setup screen instead of exposing the local demo workspace.
 
-The app reads, adds, and removes authenticated personal expenses from Supabase. With no
+The app reads, adds, and removes expenses scoped to the selected Supabase group. Signed-in
+users can create groups, switch between their groups, share an invitation code, and join a
+group by code. Group selection is remembered per signed-in account in that browser. With no
 Supabase URL/key configured during local development, it remains in local-preview mode.
+RLS remains the security boundary: the UI’s group filter is not used as an authorization check.
 Sign-in uses email and password rather than magic-link sign-in; Supabase may still send email
 verification or password-recovery links depending on your Auth settings. Existing local browser
-expenses are not automatically migrated. The group schema is prepared, but group creation,
-invites, splits, and settlements are not yet connected to the UI.
+expenses and earlier personal expenses without a `group_id` are not automatically migrated
+into a group. Expense splitting, settlements, member management, and invitations by email are
+not included yet.
+
+To verify group isolation, create a group with one account, copy its invite code, and join
+from a second account. Create another group from the second account. Each account should list
+only the groups it belongs to; the database RLS policies enforce the same boundary for
+expenses regardless of client-side filters.
 
 ---
 
