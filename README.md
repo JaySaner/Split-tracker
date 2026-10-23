@@ -82,17 +82,18 @@ npm run start   # run the production build
 1. In Supabase, open **SQL Editor** and run `supabase/schema.sql`.
 2. Run `supabase/schema_hour6.sql` after it to create groups, membership, private group policies, the creator-membership trigger, and the secure `create_group(group_name)` and `join_group(code)` functions. Re-running this migration replaces legacy short invite codes with stronger codes, so share the newly displayed code with members.
 3. Copy `.env.example` to `.env.local` and enter the project URL and publishable/anon key from **Project Settings → API**.
-4. Restart `npm run dev`, create an account, and verify your email if Supabase email confirmation is enabled.
-5. In **Authentication → URL Configuration**, allow `http://localhost:3000` and your deployed app URL for email confirmation and password recovery redirects.
-6. In Vercel, add both Supabase URL and publishable/anon key under **Project Settings → Environment Variables** for the Production environment, then redeploy. The standard names are `NEXT_PUBLIC_SUPABASE_URL` and `NEXT_PUBLIC_SUPABASE_ANON_KEY`; the app also accepts `VITE_SUPABASE_URL` and `VITE_SUPABASE_ANON_KEY`. Production builds without both values show a setup screen instead of exposing the local demo workspace.
+4. In Supabase **Authentication → Sign In / Providers → Email**, turn off **Confirm email** if you want new accounts to sign in immediately without a verification email. This reduces signup email delivery and avoids verification-email rate limits; Supabase password recovery emails can still be rate-limited.
+5. Restart `npm run dev`, create an account, then sign in with the same email and password. If you previously created an unverified account, try signing in after disabling confirmation; if it cannot sign in, wait for the rate limit to reset or remove that unverified user from Supabase **Authentication → Users** before signing up again.
+6. In **Authentication → URL Configuration**, allow `http://localhost:3000` and your deployed app URL for password recovery redirects.
+7. In Vercel, add both Supabase URL and publishable/anon key under **Project Settings → Environment Variables** for the Production environment, then redeploy. The standard names are `NEXT_PUBLIC_SUPABASE_URL` and `NEXT_PUBLIC_SUPABASE_ANON_KEY`; the app also accepts `VITE_SUPABASE_URL` and `VITE_SUPABASE_ANON_KEY`. Production builds without both values show a setup screen instead of exposing the local demo workspace.
 
 The app reads, adds, and removes expenses scoped to the selected Supabase group. Signed-in
 users can create groups, switch between their groups, share an invitation code, and join a
 group by code. Group selection is remembered per signed-in account in that browser. With no
 Supabase URL/key configured during local development, it remains in local-preview mode.
 RLS remains the security boundary: the UI’s group filter is not used as an authorization check.
-Sign-in uses email and password rather than magic-link sign-in; Supabase may still send email
-verification or password-recovery links depending on your Auth settings. Existing local browser
+Sign-in uses email and password rather than magic-link sign-in. If **Confirm email** is enabled
+in Supabase, email verification is required and signup sends a verification email. Existing local browser
 expenses and earlier personal expenses without a `group_id` are not automatically migrated
 into a group. Expense splitting, settlements, member management, and invitations by email are
 not included yet.

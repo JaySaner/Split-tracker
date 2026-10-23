@@ -32,14 +32,17 @@ export default function AuthScreen({ configurationError = '', recovery = false, 
         if (signUpError) throw signUpError;
         setMessage(data.session
           ? 'Your account is ready. You can continue to SplitSmart.'
-          : 'Check your email for a verification link, then sign in.');
-        if (!data.session) setMode('sign-in');
+          : 'Supabase did not start a session. Email confirmation may still be enabled. Turn off Confirm email in Supabase Authentication → Sign In / Providers → Email, then try again.');
       } else {
         const { error: signInError } = await supabase.auth.signInWithPassword({ email, password });
         if (signInError) throw signInError;
       }
     } catch (submitError) {
-      setError(submitError.message || 'Authentication failed. Please try again.');
+      const errorMessage = submitError.message || 'Authentication failed. Please try again.';
+      const isEmailRateLimit = `${submitError.code || ''} ${errorMessage}`.toLowerCase().includes('rate limit');
+      setError(mode === 'sign-up' && isEmailRateLimit
+        ? 'Supabase is limiting signup emails. To create accounts without verification emails, turn off Confirm email in Supabase under Authentication → Sign In / Providers → Email. Then wait for the current rate limit to reset and try again.'
+        : errorMessage);
     } finally {
       setSubmitting(false);
     }
