@@ -85,7 +85,10 @@ export default function AuthScreen({ configurationError = '', recovery = false, 
               : 'Sign in to access your saved expenses.'}</p>
         </div>
         {configurationError ? (
-          <div className="auth-error" role="alert">{configurationError}</div>
+          <div className="auth-error" role="alert">
+            <strong>Sign-in is unavailable until setup is complete.</strong>
+            <span>{configurationError}</span>
+          </div>
         ) : (
           <>
             {message && <div className="auth-success" role="status">{message}</div>}
@@ -116,6 +119,7 @@ export default function AuthScreen({ configurationError = '', recovery = false, 
                 {submitting ? 'Please wait…' : mode === 'reset' ? 'Update password' : mode === 'sign-up' ? 'Create account' : 'Sign in'}
               </button>
             </form>
+            <p className="auth-mode-note">Sign in with your email and password. No magic-link sign-in.</p>
             {mode === 'sign-in' && (
               <button className="auth-link reset-link" type="button" onClick={resetPassword} disabled={submitting}>
                 Forgot your password?
