@@ -84,7 +84,7 @@ npm run start   # run the production build
 3. Copy `.env.example` to `.env.local` and enter the project URL and publishable/anon key from **Project Settings → API**.
 4. Restart `npm run dev`, create an account, and verify your email if Supabase email confirmation is enabled.
 5. In **Authentication → URL Configuration**, allow `http://localhost:3000` and your deployed app URL for email confirmation and password recovery redirects.
-6. In Vercel, add both `NEXT_PUBLIC_SUPABASE_URL` and `NEXT_PUBLIC_SUPABASE_ANON_KEY` under **Project Settings → Environment Variables**, for the Production environment, then redeploy. Production builds without both values show a setup screen instead of exposing the local demo workspace.
+6. In Vercel, add both Supabase URL and publishable/anon key under **Project Settings → Environment Variables** for the Production environment, then redeploy. The standard names are `NEXT_PUBLIC_SUPABASE_URL` and `NEXT_PUBLIC_SUPABASE_ANON_KEY`; the app also accepts `VITE_SUPABASE_URL` and `VITE_SUPABASE_ANON_KEY`. Production builds without both values show a setup screen instead of exposing the local demo workspace.
 
 The app reads, adds, and removes authenticated personal expenses from Supabase. With no
 Supabase URL/key configured during local development, it remains in local-preview mode.
