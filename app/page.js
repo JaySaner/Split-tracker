@@ -75,12 +75,14 @@ function mapExpense(row) {
   return {
     id: row.id,
     createdBy: row.user_id,
+    payerUserId: row.paid_by_user_id || row.user_id,
     name: row.name,
     emoji: row.emoji || '🧾',
     paidBy: row.paid_by,
     amount: Number(row.amount),
     category: row.category || 'Other',
     date: row.expense_date || row.created_at?.slice(0, 10) || '',
+    splits: [],
   };
 }
 
@@ -93,6 +95,7 @@ export default function Home() {
   const [user, setUser] = useState(null);
   const [groups, setGroups] = useState([]);
   const [activeGroup, setActiveGroup] = useState(null);
+  const [groupMembers, setGroupMembers] = useState([]);
   const [groupsReady, setGroupsReady] = useState(!supabase);
   const [groupPickerOpen, setGroupPickerOpen] = useState(false);
   const [groupModal, setGroupModal] = useState('');
@@ -135,6 +138,7 @@ export default function Home() {
         if (!session) {
           setGroups([]);
           setActiveGroup(null);
+          setGroupMembers([]);
           setGroupsReady(true);
           setExpenses([]);
           setReady(true);
@@ -193,6 +197,7 @@ export default function Home() {
       if (supabase) {
         setGroups([]);
         setActiveGroup(null);
+        setGroupMembers([]);
         setGroupsReady(true);
       }
       return undefined;
@@ -253,6 +258,7 @@ export default function Home() {
   useEffect(() => {
     if (!supabase || !user || !groupsReady) return undefined;
     if (!activeGroup) {
+      setGroupMembers([]);
       setExpenses([]);
       setReady(true);
       return undefined;
@@ -260,28 +266,77 @@ export default function Home() {
 
     let active = true;
     setReady(false);
+    setGroupMembers([]);
+    setExpenses([]);
 
-    supabase
-      .from('expenses')
-      .select('id, user_id, group_id, name, emoji, paid_by, amount, category, expense_date, created_at')
-      .eq('group_id', activeGroup.id)
-      .order('expense_date', { ascending: false })
-      .order('created_at', { ascending: false })
-      .then(({ data, error }) => {
+    const loadGroupData = async () => {
+      try {
+        const [membersResult, expensesResult] = await Promise.all([
+          supabase.rpc('get_group_members', { p_group_id: activeGroup.id }),
+          supabase
+            .from('expenses')
+            .select('id, user_id, paid_by_user_id, group_id, name, emoji, paid_by, amount, category, expense_date, created_at')
+            .eq('group_id', activeGroup.id)
+            .order('expense_date', { ascending: false })
+            .order('created_at', { ascending: false }),
+        ]);
         if (!active) return;
-        if (error) {
-          setStorageError(`Could not load expenses from Supabase: ${error.message}`);
+
+        if (membersResult.error) {
+          setGroupMembers([]);
+          setStorageError(`Could not load group members: ${membersResult.error.message}. Run the latest supabase/schema_hour6.sql in Supabase.`);
         } else {
-          setExpenses((data || []).map(mapExpense));
-          setStorageError('');
+          setGroupMembers(membersResult.data || []);
         }
-        setReady(true);
-      })
-      .catch((error) => {
+
+        if (expensesResult.error) {
+          setStorageError(`Could not load expenses from Supabase: ${expensesResult.error.message}. Run the latest supabase/schema_hour6.sql in Supabase.`);
+          setReady(true);
+          return;
+        }
+
+        const rows = expensesResult.data || [];
+        if (!rows.length) {
+          setExpenses([]);
+          if (!membersResult.error) setStorageError('');
+          setReady(true);
+          return;
+        }
+
+        const { data: splitRows, error: splitError } = await supabase
+          .from('expense_splits')
+          .select('expense_id, user_id, share_amount')
+          .eq('group_id', activeGroup.id)
+          .in('expense_id', rows.map((row) => row.id));
         if (!active) return;
-        setStorageError(`Could not reach Supabase: ${error.message || 'Check your connection and try again.'}`);
+
+        if (splitError) {
+          setStorageError(`Could not load expense shares: ${splitError.message}. Run the latest supabase/schema_hour6.sql in Supabase.`);
+          setExpenses(rows.map(mapExpense));
+          setReady(true);
+          return;
+        }
+
+        const splitsByExpense = new Map();
+        (splitRows || []).forEach((split) => {
+          const current = splitsByExpense.get(split.expense_id) || [];
+          current.push({ userId: split.user_id, amount: Number(split.share_amount) });
+          splitsByExpense.set(split.expense_id, current);
+        });
+        setExpenses(rows.map((row) => ({
+          ...mapExpense(row),
+          splits: splitsByExpense.get(row.id) || [],
+        })));
+        if (!membersResult.error) setStorageError('');
         setReady(true);
-      });
+      } catch (error) {
+        if (!active) return;
+        setStorageError(`Could not load this group from Supabase: ${error.message || 'Check your connection and try again.'}`);
+        setReady(true);
+      }
+    };
+
+    loadGroupData();
 
     return () => {
       active = false;
@@ -290,14 +345,17 @@ export default function Home() {
 
   const total = expenses.reduce((sum, expense) => sum + Number(expense.amount || 0), 0);
   const average = expenses.length ? Math.round((total / expenses.length) * 100) / 100 : 0;
-  const contributors = useMemo(() => {
-    const totals = new Map();
-    expenses.forEach((expense) => {
-      const payer = expense.paidBy || 'You';
-      totals.set(payer, (totals.get(payer) || 0) + Number(expense.amount || 0));
-    });
-    return [...totals.entries()].sort((a, b) => b[1] - a[1]);
-  }, [expenses]);
+  const memberActivity = useMemo(() => groupMembers.map((member) => ({
+    member,
+    paid: expenses
+      .filter((expense) => expense.payerUserId === member.user_id)
+      .reduce((sum, expense) => sum + Number(expense.amount || 0), 0),
+    share: expenses.reduce((sum, expense) => (
+      sum + (expense.splits || [])
+        .filter((split) => split.userId === member.user_id)
+        .reduce((splitTotal, split) => splitTotal + split.amount, 0)
+    ), 0),
+  })), [groupMembers, expenses]);
   const visibleExpenses = expenses.filter((expense) =>
     `${expense.name} ${expense.paidBy}`.toLowerCase().includes(query.toLowerCase())
   );
@@ -324,22 +382,39 @@ export default function Home() {
         .from('expenses')
         .insert({
           user_id: user.id,
+          paid_by_user_id: user.id,
           group_id: activeGroup.id,
           name: expense.name,
           emoji: expense.emoji || '🧾',
-          paid_by: expense.paidBy || user.email || 'You',
+          paid_by: groupMembers.find((member) => member.user_id === user.id)?.display_name || user.email || 'Group member',
           amount: expense.amount,
           category: expense.category || 'Other',
           expense_date: expense.date || localDateString(),
         })
-        .select('id, user_id, group_id, name, emoji, paid_by, amount, category, expense_date, created_at')
+        .select('id, user_id, paid_by_user_id, group_id, name, emoji, paid_by, amount, category, expense_date, created_at')
         .single();
 
       if (error) {
-        setStorageError(`Could not save the expense: ${error.message}`);
+        setStorageError(`Could not save the expense: ${error.message}. Run the latest supabase/schema_hour6.sql in Supabase.`);
         return false;
       }
-      setExpenses((list) => [mapExpense(data), ...list]);
+      const { data: splitRows, error: splitError } = await supabase
+        .from('expense_splits')
+        .select('expense_id, user_id, share_amount')
+        .eq('expense_id', data.id);
+
+      if (splitError) {
+        setStorageError(`Expense was saved, but its shares could not be loaded: ${splitError.message}. Run the latest supabase/schema_hour6.sql in Supabase.`);
+        setExpenses((list) => [mapExpense(data), ...list]);
+        return true;
+      }
+      setExpenses((list) => [{
+        ...mapExpense(data),
+        splits: (splitRows || []).map((split) => ({
+          userId: split.user_id,
+          amount: Number(split.share_amount),
+        })),
+      }, ...list]);
       setStorageError('');
       return true;
     } catch (error) {
@@ -429,6 +504,7 @@ export default function Home() {
 
   const selectGroup = (group) => {
     setActiveGroup(group);
+    setGroupMembers([]);
     setExpenses([]);
     setReady(false);
     setGroupPickerOpen(false);
@@ -466,6 +542,7 @@ export default function Home() {
 
       setGroups((currentGroups) => [data, ...currentGroups]);
       setActiveGroup(data);
+      setGroupMembers([]);
       setExpenses([]);
       setReady(false);
       rememberGroup(data.id);
@@ -492,6 +569,10 @@ export default function Home() {
         setGroupError(`Could not join group: ${joinError.message}`);
         return;
       }
+      if (!groupId) {
+        setGroupError('That invite code is invalid, or too many codes have been tried. Check the six digits. You can try again after 15 minutes.');
+        return;
+      }
 
       const { data, error } = await supabase
         .from('groups')
@@ -509,6 +590,7 @@ export default function Home() {
         ...currentGroups.filter((group) => group.id !== data.id),
       ]);
       setActiveGroup(data);
+      setGroupMembers([]);
       setExpenses([]);
       setReady(false);
       rememberGroup(data.id);
@@ -748,18 +830,39 @@ export default function Home() {
               ) : (
                 <div className="expense-list">
                   {visibleExpenses.map((expense) => (
-                    <div className="expense-row" key={expense.id}>
-                      <div className={`expense-icon ${expense.category ? `category-${expense.category.toLowerCase()}` : ''}`}>{expense.emoji || '🧾'}</div>
-                      <div className="expense-info">
-                        <strong>{expense.name}</strong>
-                        <span>Paid by {expense.paidBy || 'You'} <span className="metadata-dot">·</span> {expense.category || 'Shared expense'}</span>
+                    <div className="expense-entry" key={expense.id}>
+                      <div className="expense-row">
+                        <div className={`expense-icon ${expense.category ? `category-${expense.category.toLowerCase()}` : ''}`}>{expense.emoji || '🧾'}</div>
+                        <div className="expense-info">
+                          <strong>{expense.name}</strong>
+                          <span>
+                            Paid by {groupMembers.find((member) => member.user_id === expense.payerUserId)?.display_name || expense.paidBy || 'Group member'}
+                            <span className="metadata-dot"> · </span>{expense.category || 'Shared expense'}
+                          </span>
+                        </div>
+                        <div className="expense-date">{formatDate(expense.date)}</div>
+                        <div className="expense-amount">{inr(expense.amount)}</div>
+                        {(!supabase || expense.createdBy === user?.id) && (
+                          <button className="remove-button" type="button" aria-label={`Remove ${expense.name}`} disabled={saving} onClick={() => removeExpense(expense.id)}>
+                            <Icon name="trash" size={15} />
+                          </button>
+                        )}
                       </div>
-                      <div className="expense-date">{formatDate(expense.date)}</div>
-                      <div className="expense-amount">{inr(expense.amount)}</div>
-                      {(!supabase || expense.createdBy === user?.id) && (
-                        <button className="remove-button" type="button" aria-label={`Remove ${expense.name}`} disabled={saving} onClick={() => removeExpense(expense.id)}>
-                          <Icon name="trash" size={15} />
-                        </button>
+                      {expense.splits?.length > 0 && (
+                        <details className="expense-splits" open>
+                          <summary>Equal split between {expense.splits.length} {expense.splits.length === 1 ? 'member' : 'members'}</summary>
+                          <div className="expense-split-list">
+                            {expense.splits.map((split) => {
+                              const member = groupMembers.find((item) => item.user_id === split.userId);
+                              return (
+                                <div className="expense-split-person" key={split.userId}>
+                                  <span>{member?.display_name || member?.email || 'Group member'}</span>
+                                  <strong>{inr(split.amount)}</strong>
+                                </div>
+                              );
+                            })}
+                          </div>
+                        </details>
                       )}
                     </div>
                   ))}
@@ -786,23 +889,29 @@ export default function Home() {
               )}
               <article className="panel group-panel" id="people">
                 <div className="panel-header compact">
-                  <div><h2>Payer activity</h2><p className="panel-subtitle">Who&apos;s been picking up the bill.</p></div>
+                  <div><h2>Group members</h2><p className="panel-subtitle">Members, paid totals, and equal shares.</p></div>
                   <span className="activity-marker" aria-hidden="true"><Icon name="users" size={15} /></span>
                 </div>
-                {contributors.length ? (
+                {memberActivity.length ? (
                   <div className="contributors-list">
-                    {contributors.map(([name, amount], index) => (
-                      <div className="contributor-row" key={name}>
-                        <span className={`avatar contributor-avatar avatar-tone-${index % 4}`}>{name.slice(0, 1).toUpperCase()}</span>
-                        <span className="contributor-name">{name}</span>
-                        <span className="contributor-amount">{inr(amount)}</span>
+                    {memberActivity.map(({ member, paid, share }, index) => (
+                      <div className="contributor-row member-row" key={member.user_id}>
+                        <span className={`avatar contributor-avatar avatar-tone-${index % 4}`}>{member.display_name.slice(0, 1).toUpperCase()}</span>
+                        <span className="contributor-person">
+                          <strong>{member.display_name}</strong>
+                          <small>{member.email || 'Email unavailable'}</small>
+                        </span>
+                        <span className="member-totals">
+                          <span><small>Paid</small>{inr(paid)}</span>
+                          <span><small>Share</small>{inr(share)}</span>
+                        </span>
                       </div>
                     ))}
                   </div>
                 ) : (
-                  <div className="mini-empty">Payer activity will appear here once you add expenses.</div>
+                  <div className="mini-empty">{activeGroup ? 'Group members will appear here once loaded.' : 'Choose a group to see its members.'}</div>
                 )}
-                <div className="group-footnote"><span className="info-mark">i</span> Totals reflect recorded expenses only.</div>
+                <div className="group-footnote"><span className="info-mark">i</span> New expenses are split evenly among members.</div>
               </article>
 
               <article className="insight-card" id="insights">
@@ -829,7 +938,7 @@ export default function Home() {
               <div><span className="modal-kicker">{activeGroup?.name || 'MY GROUP'}</span><h2 id="modal-title">Add an expense</h2></div>
               <button className="icon-button modal-close" type="button" aria-label="Close dialog" onClick={() => setModalOpen(false)}><Icon name="close" /></button>
             </div>
-            <p className="modal-description">Keep track of a shared purchase. You can add split details later.</p>
+            <p className="modal-description">Keep track of a shared purchase. The amount is split evenly among current group members.</p>
             {formError && <p className="form-error" role="alert">{formError}</p>}
             <form className="expense-form" onSubmit={addExpense}>
               <label className="field-label">What was it for?
@@ -847,7 +956,12 @@ export default function Home() {
               </div>
               <div className="form-row">
                 <label className="field-label">Paid by
-                  <input name="paidBy" maxLength={50} defaultValue={user?.email || 'You'} required />
+                  <input
+                    name="paidBy"
+                    value={groupMembers.find((member) => member.user_id === user?.id)?.display_name || user?.email || 'You'}
+                    readOnly
+                    required
+                  />
                 </label>
                 <label className="field-label">Date
                   <span className="date-input"><Icon name="calendar" size={16} />                  <input name="date" type="date" defaultValue={localDateString()} /></span>
@@ -904,19 +1018,21 @@ export default function Home() {
                   <input
                     name="joinCode"
                     autoFocus
-                    maxLength={32}
+                    maxLength={6}
                     autoCapitalize="characters"
                     autoComplete="off"
+                    inputMode="numeric"
+                    pattern="[0-9]{6}"
                     value={joinCode}
-                    onChange={(event) => setJoinCode(event.target.value.replace(/\s/g, '').toUpperCase())}
-                    placeholder="Paste the group code"
+                    onChange={(event) => setJoinCode(event.target.value.replace(/\D/g, '').slice(0, 6))}
+                    placeholder="Enter 6-digit code"
                     required
                   />
                 </label>
                 <p className="form-disclaimer">Only join groups from people you trust. The code grants access to that group.</p>
                 <div className="modal-actions">
                   <button className="button-secondary" type="button" disabled={groupBusy} onClick={() => setGroupModal('')}>Cancel</button>
-                  <button className="button-primary" type="submit" disabled={groupBusy || !joinCode.trim()}>
+                  <button className="button-primary" type="submit" disabled={groupBusy || !/^\d{6}$/.test(joinCode)}>
                     {groupBusy ? 'Joining…' : 'Join group'}
                   </button>
                 </div>
