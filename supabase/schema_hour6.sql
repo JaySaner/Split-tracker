@@ -3,6 +3,7 @@
 -- Run schema.sql first, then run this file. This migration is safe to rerun.
 -- Six-digit join codes are bearer invitations: share them only with intended members.
 -- Join attempts are limited to five incorrect codes per user every 15 minutes.
+-- Every expense is shared by all current group members; membership changes rebalance existing expenses.
 
 create or replace function public.generate_group_join_code()
 returns text
@@ -134,6 +135,50 @@ alter table public.expense_splits enable row level security;
 revoke all on public.expense_splits from anon, authenticated;
 grant select on public.expense_splits to authenticated;
 
+create or replace function public.rebuild_group_expense_splits(p_group_id uuid)
+returns void
+language plpgsql
+security definer
+set search_path = public
+as $$
+begin
+  delete from public.expense_splits
+  where group_id = p_group_id;
+
+  with member_splits as (
+    select
+      expense.id as expense_id,
+      expense.group_id,
+      expense.amount,
+      member.user_id,
+      row_number() over (partition by expense.id order by member.user_id) as member_number,
+      count(*) over (partition by expense.id) as member_count
+    from public.expenses as expense
+    join public.group_members as member on member.group_id = expense.group_id
+    where expense.group_id = p_group_id
+  ),
+  totals as (
+    select expense_id, round(amount * 100)::bigint as cents
+    from member_splits
+    group by expense_id, amount
+  )
+  insert into public.expense_splits (expense_id, group_id, user_id, share_amount)
+  select
+    member_splits.expense_id,
+    member_splits.group_id,
+    member_splits.user_id,
+    (
+      floor(totals.cents::numeric / member_splits.member_count)
+      + case
+          when member_splits.member_number <= totals.cents % member_splits.member_count then 1
+          else 0
+        end
+    ) / 100
+  from member_splits
+  join totals using (expense_id);
+end;
+$$;
+
 create or replace function public.populate_expense_splits()
 returns trigger
 language plpgsql
@@ -152,7 +197,6 @@ begin
       count(*) over () as member_count
     from public.group_members
     where group_id = new.group_id
-      and joined_at <= new.created_at
   ),
   total as (
     select round(new.amount * 100)::bigint as cents
@@ -182,40 +226,22 @@ create trigger expenses_populate_splits
   after insert on public.expenses
   for each row execute function public.populate_expense_splits();
 
-with eligible_members as (
-  select
-    expense.id as expense_id,
-    expense.group_id,
-    expense.amount,
-    members.user_id,
-    row_number() over (partition by expense.id order by members.user_id) as member_number,
-    count(*) over (partition by expense.id) as member_count
-  from public.expenses as expense
-  join public.group_members as members
-    on members.group_id = expense.group_id
-   and members.joined_at <= expense.created_at
-  where expense.group_id is not null
-),
-total as (
-  select expense_id, round(amount * 100)::bigint as cents
-  from eligible_members
-  group by expense_id, amount
-)
-insert into public.expense_splits (expense_id, group_id, user_id, share_amount)
-select
-  eligible_members.expense_id,
-  eligible_members.group_id,
-  eligible_members.user_id,
-  (
-    floor(total.cents::numeric / eligible_members.member_count)
-    + case
-        when eligible_members.member_number <= total.cents % eligible_members.member_count then 1
-        else 0
-      end
-  ) / 100
-from eligible_members
-join total using (expense_id)
-on conflict (expense_id, user_id) do nothing;
+create or replace function public.refresh_group_expense_splits_after_membership()
+returns trigger
+language plpgsql
+security definer
+set search_path = public
+as $$
+begin
+  if tg_op = 'DELETE' then
+    perform public.rebuild_group_expense_splits(old.group_id);
+    return old;
+  end if;
+
+  perform public.rebuild_group_expense_splits(new.group_id);
+  return new;
+end;
+$$;
 
 create table if not exists public.group_join_attempts (
   user_id           uuid primary key references auth.users(id) on delete cascade,
@@ -328,6 +354,22 @@ insert into public.group_members (group_id, user_id, role)
 select id, created_by, 'owner'
 from public.groups
 on conflict (group_id, user_id) do update set role = 'owner';
+
+drop trigger if exists group_members_refresh_expense_splits on public.group_members;
+create trigger group_members_refresh_expense_splits
+  after insert or delete on public.group_members
+  for each row execute function public.refresh_group_expense_splits_after_membership();
+
+do $$
+declare
+  group_to_rebuild uuid;
+begin
+  for group_to_rebuild in select id from public.groups
+  loop
+    perform public.rebuild_group_expense_splits(group_to_rebuild);
+  end loop;
+end;
+$$;
 
 -- Joining requires an authenticated user and a valid six-digit invite code.
 -- Failed guesses are counted without exposing whether a code exists.
@@ -463,6 +505,8 @@ revoke all on function public.generate_group_join_code() from public;
 revoke all on function public.add_group_creator_as_member() from public;
 revoke all on function public.set_group_updated_at() from public;
 revoke all on function public.populate_expense_splits() from public;
+revoke all on function public.rebuild_group_expense_splits(uuid) from public;
+revoke all on function public.refresh_group_expense_splits_after_membership() from public;
 grant execute on function public.is_group_member(uuid) to authenticated;
 grant execute on function public.is_group_owner(uuid) to authenticated;
 grant execute on function public.is_active_group_member(uuid) to authenticated;

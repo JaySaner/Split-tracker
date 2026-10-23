@@ -90,8 +90,11 @@ npm run start   # run the production build
 The app reads, adds, and removes expenses scoped to the selected Supabase group. Signed-in
 users can see group member names and emails, create groups, switch between their groups,
 share an invitation code, and join a group by code. New group expenses are split evenly
-among members who had joined when the expense was added; each expense shows its share
-breakdown and each member’s totals. Group selection is remembered per signed-in account in that browser. With no
+among all current group members; when someone joins or leaves, existing expense shares
+are recalculated for the current membership. Each expense shows its share breakdown and
+each member’s totals. The dashboard estimates how much members owe you for
+expenses you paid and your share of expenses paid by others; it does not record repayments.
+Group selection is remembered per signed-in account in that browser. With no
 Supabase URL/key configured during local development, it remains in local-preview mode.
 RLS remains the security boundary: the UI’s group filter is not used as an authorization check.
 Sign-in uses email and password rather than magic-link sign-in. If **Confirm email** is enabled

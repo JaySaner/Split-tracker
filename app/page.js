@@ -82,6 +82,7 @@ function mapExpense(row) {
     amount: Number(row.amount),
     category: row.category || 'Other',
     date: row.expense_date || row.created_at?.slice(0, 10) || '',
+    createdAt: row.created_at || null,
     splits: [],
   };
 }
@@ -345,18 +346,58 @@ export default function Home() {
 
   const total = expenses.reduce((sum, expense) => sum + Number(expense.amount || 0), 0);
   const average = expenses.length ? Math.round((total / expenses.length) * 100) / 100 : 0;
+  const expensesWithSplits = useMemo(() => expenses.map((expense) => {
+    if (!groupMembers.length) return expense;
+
+    const currentMembers = [...groupMembers]
+      .sort((first, second) => first.user_id.localeCompare(second.user_id));
+    const currentMemberIds = new Set(currentMembers.map((member) => member.user_id));
+    if (!currentMembers.length) return expense;
+    if (
+      expense.splits?.length === currentMembers.length
+      && expense.splits.every((split) => currentMemberIds.has(split.userId))
+    ) return expense;
+
+    const cents = Math.round(Number(expense.amount) * 100);
+    const baseShare = Math.floor(cents / currentMembers.length);
+    const remainder = cents % currentMembers.length;
+    return {
+      ...expense,
+      splits: currentMembers.map((member, index) => ({
+        userId: member.user_id,
+        amount: (baseShare + (index < remainder ? 1 : 0)) / 100,
+      })),
+    };
+  }), [expenses, groupMembers]);
   const memberActivity = useMemo(() => groupMembers.map((member) => ({
     member,
-    paid: expenses
+    paid: expensesWithSplits
       .filter((expense) => expense.payerUserId === member.user_id)
       .reduce((sum, expense) => sum + Number(expense.amount || 0), 0),
-    share: expenses.reduce((sum, expense) => (
-      sum + (expense.splits || [])
+    share: expensesWithSplits.reduce((sum, expense) => (
+      sum + expense.splits
         .filter((split) => split.userId === member.user_id)
         .reduce((splitTotal, split) => splitTotal + split.amount, 0)
     ), 0),
-  })), [groupMembers, expenses]);
-  const visibleExpenses = expenses.filter((expense) =>
+  })), [groupMembers, expensesWithSplits]);
+  const settlementTotals = useMemo(() => {
+    const cents = expensesWithSplits.reduce((totals, expense) => {
+      if (!user) return totals;
+      const splits = expense.splits;
+      if (expense.payerUserId === user.id) {
+        totals.toReceive += splits
+          .filter((split) => split.userId !== user.id)
+          .reduce((sum, split) => sum + Math.round(split.amount * 100), 0);
+      } else {
+        totals.toPay += splits
+          .filter((split) => split.userId === user.id)
+          .reduce((sum, split) => sum + Math.round(split.amount * 100), 0);
+      }
+      return totals;
+    }, { toReceive: 0, toPay: 0 });
+    return { toReceive: cents.toReceive / 100, toPay: cents.toPay / 100 };
+  }, [expensesWithSplits, user]);
+  const visibleExpenses = expensesWithSplits.filter((expense) =>
     `${expense.name} ${expense.paidBy}`.toLowerCase().includes(query.toLowerCase())
   );
 
@@ -716,6 +757,51 @@ export default function Home() {
 
       <section className="main-area" id="overview">
         <header className="topbar">
+          {supabase && (
+            <div className="mobile-workspace">
+              <button
+                className="mobile-workspace-button"
+                type="button"
+                aria-label={`Current group: ${activeGroup?.name || 'No group selected'}`}
+                aria-expanded={groupPickerOpen}
+                onClick={() => setGroupPickerOpen((open) => !open)}
+              >
+                <span className="workspace-icon">{activeGroup?.name?.slice(0, 1).toUpperCase() || '+'}</span>
+                <span className="mobile-workspace-copy">
+                  <small>CURRENT GROUP</small>
+                  <strong>{activeGroup?.name || 'Choose a group'}</strong>
+                </span>
+                <Icon name="down" size={15} />
+              </button>
+              {groupPickerOpen && (
+                <div className="mobile-group-picker" role="menu" aria-label="Switch group">
+                  <span className="group-picker-label">YOUR GROUPS</span>
+                  {groups.map((group) => (
+                    <button
+                      className={`group-picker-item ${activeGroup?.id === group.id ? 'selected' : ''}`}
+                      type="button"
+                      role="menuitem"
+                      key={group.id}
+                      onClick={() => selectGroup(group)}
+                    >
+                      <span className="group-picker-avatar">{group.name.slice(0, 1).toUpperCase()}</span>
+                      <span>{group.name}</span>
+                      {activeGroup?.id === group.id && <span className="group-picker-check">✓</span>}
+                    </button>
+                  ))}
+                  {!groups.length && <p className="group-picker-empty">Create a group or join one with an invite code.</p>}
+                  <div className="group-picker-actions">
+                    <button type="button" onClick={() => { setGroupError(''); setGroupName(''); setGroupModal('create'); setGroupPickerOpen(false); }}>
+                      <Icon name="plus" size={14} /> Create group
+                    </button>
+                    <button type="button" onClick={() => { setGroupError(''); setJoinCode(''); setGroupModal('join'); setGroupPickerOpen(false); }}>
+                      Join with code
+                    </button>
+                  </div>
+                </div>
+              )}
+            </div>
+          )}
           <div className="breadcrumbs"><span>Workspace</span><Icon name="chevron" size={14} /><strong>Overview</strong></div>
           <div className="topbar-actions">
             <span className={`local-badge ${supabase ? 'connected-badge' : ''}`}><span /> {supabase ? 'Supabase connected' : 'Local preview'}</span>
@@ -755,6 +841,27 @@ export default function Home() {
                   Join a group
                 </button>
               </div>
+            </section>
+          )}
+
+          {supabase && activeGroup && (
+            <section className="settlement-cards" aria-label="Your group balances">
+              <article className="settlement-card settlement-card-receive">
+                <span className="settlement-card-icon" aria-hidden="true"><Icon name="arrow" size={18} /></span>
+                <div className="settlement-card-copy">
+                  <span className="settlement-card-label">TOTAL MONEY YOU GET</span>
+                  <strong>{inr(settlementTotals.toReceive)}</strong>
+                  <small>Other members’ shares of expenses you paid</small>
+                </div>
+              </article>
+              <article className="settlement-card settlement-card-pay">
+                <span className="settlement-card-icon" aria-hidden="true"><Icon name="arrow" size={18} /></span>
+                <div className="settlement-card-copy">
+                  <span className="settlement-card-label">TOTAL MONEY YOU GIVE</span>
+                  <strong>{inr(settlementTotals.toPay)}</strong>
+                  <small>Your share of expenses paid by other members</small>
+                </div>
+              </article>
             </section>
           )}
 
@@ -885,6 +992,36 @@ export default function Home() {
                     </button>
                   </div>
                   <p className="invite-warning">Anyone with this code can join. Share it only with people you trust.</p>
+                </article>
+              )}
+              {supabase && activeGroup && (
+                <article className="panel group-panel payable-panel" aria-labelledby="payable-title">
+                  <div className="panel-header compact">
+                    <div>
+                      <h2 id="payable-title">Total payable by member</h2>
+                      <p className="panel-subtitle">Each member’s share of group expenses.</p>
+                    </div>
+                    <span className="activity-marker" aria-hidden="true"><Icon name="receipt" size={15} /></span>
+                  </div>
+                  {memberActivity.length ? (
+                    <div className="payable-list">
+                      {memberActivity.map(({ member, share }, index) => (
+                        <div className="payable-row" key={member.user_id}>
+                          <span className={`avatar contributor-avatar avatar-tone-${index % 4}`}>
+                            {member.display_name.slice(0, 1).toUpperCase()}
+                          </span>
+                          <span className="payable-member">
+                            <strong>{member.display_name}</strong>
+                            <small>{member.email || 'Email unavailable'}</small>
+                          </span>
+                          <strong className="payable-amount">{inr(share)}</strong>
+                        </div>
+                      ))}
+                    </div>
+                  ) : (
+                    <div className="mini-empty">Payable totals will appear when group members load.</div>
+                  )}
+                  <div className="group-footnote"><span className="info-mark">i</span> Calculated from each member’s equal share.</div>
                 </article>
               )}
               <article className="panel group-panel" id="people">
